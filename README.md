@@ -6,7 +6,7 @@ Currently in Class 10, I love building projects that challenge me and help me le
 ## 🔧 Tech Stack (Learning & Practicing)
 - **Languages:** Python (actively learning), JavaScript (practicing), HTML & CSS (building small projects)
 - **Frameworks & Libraries:** Flask (projects in progress), React (learning), Django (planned)
-- **Tools & Platforms:** Git, GitHub, VS Code, Postman, Linux basics
+- **Tools & Platforms:** Git, GitHub, VS Code
 
 ## 🌱 Currently Learning
 - Full-stack web development  
@@ -15,8 +15,7 @@ Currently in Class 10, I love building projects that challenge me and help me le
 - Project structuring & best coding practices  
 
 ## ⚡ Projects
-- **File & Text Encryptor** – A secure drag & drop tool for encrypting files and text  
-- **EchoAI** – Personal AI assistant I built from scratch  
+- **File & Text Encryptor(made with the help of Claude AI)** – A secure drag & drop tool for encrypting files and text
 - **Other Mini Projects** – Small Python & web experiments to improve my coding skills  
 
 ## 📫 Connect with me
