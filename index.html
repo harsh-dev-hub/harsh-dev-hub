@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" /><title>Advanced Real-Time Interactive 3D Particle System</title>
+  <style>
+    html, body {width:100%;height:100%;margin:0;padding:0;overflow:hidden;background:#181825}
+    #overlay {
+      position:absolute; top:12px; left:12px; color:#eee; background:rgba(10,10,16,0.7);
+      border-radius:12px; z-index:10; font-size:1rem; font-family:sans-serif;
+      padding:12px; min-width: 260px;
+    }
+    #video {display:none;}
+    .template-btn {margin:6px 4px 0 0;padding:2px 10px;}
+  </style>
+</head>
+<body>
+<div id="overlay">
+  <b>✨ Advanced Particle Playground</b><br>
+  <span>Mode: <span id="templateName" style="font-weight:bold">-</span></span><br>
+  <span>Hand: <span id="gestureName">detecting…</span></span> <br>
+  <span id="helpText">🖐️ Palm expands · ✊ Fist color-cycles · 🤏 Pinch: burst · ➡️ Swipe switches template</span>
+</div>
+<video id="video" width="320" height="240" autoplay playsinline muted></video>
+<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.154.0/examples/js/controls/OrbitControls.js"></script>
+<!-- TensorFlow.js and MediaPipe Hands -->
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-core@4.17.0/dist/tf-core.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-converter@4.17.0/dist/tf-converter.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs-backend-webgl@4.17.0/dist/tf-backend-webgl.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.2"></script>
+<script>
+let scene, camera, renderer, controls, clock;
+let particleSystem, particleUniforms, nParticles=4000;
+let currentTemplate=0, templateNames=[];
+let isBurst = false, burstTimeout = 0;
+
+// ---- PARTICLE TEMPLATES ----
+const templates = [
+  {
+    name:"Heart",
+    formula: (i,N,t)=> {
+      let u = i/N*Math.PI*2, v = (i%200)/200*Math.PI*2;
+      // 3D heart parametric
+      let a= Math.sin(u)*Math.sqrt(Math.abs(Math.cos(u)))/ (Math.sin(u)+1.4)-2*Math.sin(u)+2;
+      let x=16*Math.pow(Math.sin(u),3) * Math.cos(v)/7;
+      let y=(13*Math.cos(u)-5*Math.cos(2*u)-2*Math.cos(3*u)-Math.cos(4*u))/7 + Math.sin(v)*1.5;
+      let z=(Math.cos(v)*a*4);
+      return [x,y,z];
+    }
+  },
+  {
+    name:"Flower",
+    formula: (i,N,t)=> {
+      let u = i/N*Math.PI*2*6, radius = 8+Math.sin(7*u+t)*3;
+      let y = Math.cos(u*1.5+t)*3;
+      return [Math.cos(u)*radius, y, Math.sin(u)*radius];
+    }
+  },
+  {
+    name: "Saturn",
+    formula: (i,N,t)=>{
+      // central sphere + ring
+      if(i<N*0.7){
+        // ring
+        let u = (i/(N*0.7))*Math.PI*2, r=10+0.6*Math.sin(u*8+t*1.5);
+        return [Math.cos(u)*r, Math.sin(u)*r*0.31, Math.sin(u*2+t)*2];
+      } else{
+        // sphere cloud
+        let phi=2*Math.PI*(i/(N-1)), theta=Math.acos(2*(i/(N-1))-1);
+        let r=6+(Math.sin(t+phi*2)*2);
+        let x=r*Math.sin(theta)*Math.cos(phi), y=r*Math.sin(theta)*Math.sin(phi),z=r*Math.cos(theta);
+        return [x,y,z/1.6];
+      }
+    }
+  },
+  {
+    name:"Cube",
+    formula: (i,N,t)=>{
+      // Scatter uniformly over cube + a bit of noise
+      let f = ((i/N)*2-1);
+      let x = (Math.random()-0.5)*12 + (f>0?6:-6);
+      let y = (Math.random()-0.5)*12 + (i%2?6:-6);
+      let z = (Math.random()-0.5)*12 + (i%3?6:-6);
+      return [x,y,z];
+    }
+  },
+  {
+    name: "Firework",
+    formula: (i,N,t)=>{
+      // Uniform sphere burst
+      let phi = Math.acos(2*Math.random()-1), theta=2*Math.PI*Math.random(), r=7+Math.sin(t+i)*3;
+      if(isBurst){ r*=2.3*Math.random(); }
+      let x=r*Math.sin(phi)*Math.cos(theta), y=r*Math.sin(phi)*Math.sin(theta), z=r*Math.cos(phi);
+      return [x,y,z];
+    }
+  },
+  {
+    name: "Torus Knot",
+    formula: (i,N,t)=>{
+      let p=2, q=3, u= i/N * Math.PI*2*2;
+      let r = 7 + Math.cos(q*u+t*0.8)*1.7;
+      let x = Math.cos(p*u)*(r+Math.cos(q*u+t)*2.7);
+      let y = Math.sin(p*u)*(r+Math.sin(q*u+t)*2.7);
+      let z = Math.sin(q*u+t)*3;
+      return [x, y, z];
+    }
+  }
+];
+templateNames = templates.map(t=>t.name);
+
+// ---- THREE.JS SCENE ----
+scene = new THREE.Scene();
+camera = new THREE.PerspectiveCamera(65, window.innerWidth/window.innerHeight, 0.05, 1000);
+camera.position.set(0,0,46);
+renderer = new THREE.WebGLRenderer({antialias:true,alpha:false});
+renderer.setClearColor(0x181825);
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+controls = new THREE.OrbitControls(camera, renderer.domElement);
+controls.enablePan = false; controls.enableDamping = true;
+clock = new THREE.Clock();
+
+// ---- PARTICLE SYSTEM USING GLSL ----
+const vert = `
+  attribute float pindex;
+  uniform float uTime, uSize, uExpansion, uTwirl;
+  uniform float uParticleMode;
+  varying vec3 vColor;
+  varying float vPct;
+  //
+  vec3 getTemplate(float i, float N, float t) {
+    // Define all shapes from JS side, pass as attributes or use mode switch here (for future refinement)
+    // But for performance and flexibility, JS precomputes.
+    return position;
+  }
+  void main() {
+    // Receive position attribute prepared in JS for template switching
+    float scale = uExpansion;
+    vec3 p = position*scale;
+    // Twirl = spiraling (interactive)
+    float twirlAmt = sin(uTwirl)*1.1+1.5;
+    float ang = uTwirl*1.4 + pindex/600.0 + uTime*0.05;
+    mat2 rot = mat2(cos(ang),-sin(ang),sin(ang),cos(ang));
+    p.xz = rot*p.xz;
+    float hue = mod(pindex/800.0+uTime*0.01+uTwirl*0.3,1.0);
+    float sat = 0.88;
+    float val = 0.85 + 0.14 * sin(uTime + pindex*0.17);
+    // HSV to RGB (approx)
+    float c = val*sat, x = c*(1.0-abs(mod(hue*6.0, 2.0)-1.0)), m = val-c;
+    vec3 rgb;
+    if(hue < 1.0/6.0) rgb=vec3(c,x,0.0);
+    else if(hue<2.0/6.0) rgb=vec3(x,c,0.0);
+    else if(hue<3.0/6.0) rgb=vec3(0.0,c,x);
+    else if(hue<4.0/6.0) rgb=vec3(0.0,x,c);
+    else if(hue<5.0/6.0) rgb=vec3(x,0.0,c);
+    else rgb=vec3(c,0.0,x);
+    vColor = rgb + m;
+    vPct = pindex/float(${nParticles});
+    gl_PointSize = mix(uSize, uSize*2.4, vPct);
+    gl_Position = projectionMatrix * modelViewMatrix * vec4(p,1.0);
+  }
+`;
+const frag = `
+  precision highp float;
+  varying vec3 vColor;
+  varying float vPct;
+  void main(){
+    float r = length(gl_PointCoord.xy-vec2(0.5));
+    float mask = smoothstep(0.55,0.26, r);
+    if(r>0.5) discard;
+    gl_FragColor = vec4(vColor * (0.6+0.6*mask), mask*(vPct*0.4+0.65));
+  }
+`;
+
+function generateParticleData(templateIdx, t=0){
+  let posArr=[], indexArr=[];
+  for(let i=0; i<nParticles; ++i){
+    let [x,y,z] = templates[templateIdx].formula(i, nParticles, t);
+    posArr.push(x,y,z);
+    indexArr.push(i);
+  }
+  return [new Float32Array(posArr), new Float32Array(indexArr)];
+}
+
+let [initPosArr, initIndexArr] = generateParticleData(currentTemplate, 0);
+let geometry = new THREE.BufferGeometry();
+geometry.setAttribute('position', new THREE.BufferAttribute(initPosArr, 3));
+geometry.setAttribute('pindex', new THREE.BufferAttribute(initIndexArr, 1));
+
+particleUniforms = {
+  uTime: {value: 0},
+  uSize: {value: window.devicePixelRatio>1?2.8:3.4},
+  uExpansion: {value: 1},
+  uTwirl: {value: 0},
+  uParticleMode: {value: currentTemplate}
+};
+let material = new THREE.ShaderMaterial({
+  uniforms: particleUniforms,
+  vertexShader: vert,
+  fragmentShader: frag,
+  transparent: true,
+  depthTest: false, blending: THREE.AdditiveBlending
+});
+particleSystem = new THREE.Points(geometry, material);
+scene.add(particleSystem);
+
+function updateParticleGeometry(idx, t=0){
+  let [posArr, indexArr] = generateParticleData(idx, t);
+  geometry.setAttribute('position', new THREE.BufferAttribute(posArr, 3));
+  geometry.setAttribute('pindex', new THREE.BufferAttribute(indexArr, 1));
+  geometry.attributes.position.needsUpdate=true;
+  geometry.attributes.pindex.needsUpdate=true;
+}
+function switchTemplate(idx){
+  currentTemplate = idx % templates.length;
+  document.getElementById('templateName').innerText = templates[currentTemplate].name;
+  particleUniforms.uParticleMode.value = currentTemplate;
+  updateParticleGeometry(currentTemplate, particleUniforms.uTime.value);
+}
+// UI template indicator
+switchTemplate(0);
+
+// ---- HAND DETECTION - MEDIAPIPE ----
+const {HandLandmarker, FilesetResolver} = window;
+let handDetector, lastGesture='detecting…', lastX=0, swipeCooldown=0, pinchCooldown=0;
+async function initHandDetector(){
+  const vision = await FilesetResolver.forVisionTasks(
+    "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm"
+  );
+  handDetector = await HandLandmarker.createFromOptions(vision, {
+    baseOptions: { modelAssetPath: 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision/wasm/hand_landmarker.task' },
+    runningMode: "VIDEO",
+    numHands: 1
+  });
+  await setupWebcam();
+}
+
+async function setupWebcam(){
+  let videoEl = document.getElementById('video');
+  let stream = await navigator.mediaDevices.getUserMedia({video: {width: 320, height:240}});
+  videoEl.srcObject = stream;
+  videoEl.onloadedmetadata = ()=>videoEl.play();
+}
+
+// ---- HAND GESTURE CLASSIFICATION ----
+function calcDistance(a,b){ return Math.hypot(a.x-b.x, a.y-b.y);}
+function gestureFromLandmarks(landmarks){
+  // Return {type, info} (type: open, fist, swipe-left, swipe-right, pinch, none)
+  const tipIDs = [4,8,12,16,20];
+  if(!landmarks) return {type:'none'};
+  let palm = landmarks[0];
+  // Finger open close logic
+  let open = tipIDs.slice(1).map(i => landmarks[i].y < landmarks[i-2].y-0.03);
+  let openness = open.reduce((a,b)=>a+b,0)/open.length;
+  // Pinch detection
+  let pinch = (calcDistance(landmarks[4], landmarks[8]) < 0.045);
+  // Fist: all fingers closed
+  if(openness < 0.2 && !pinch) return {type:"fist"};
+  // Pinch gesture
+  if(pinch) return {type:"pinch"};
+  // Open: all fingers extended
+  if(openness > 0.85) return {type:"open"};
+  return {type:"partial"};
+}
+// ---- MAIN ANIMATION LOOP ----
+function animate(){
+  requestAnimationFrame(animate);
+  let t = clock.getElapsedTime();
+  particleUniforms.uTime.value = t;
+  controls.update();
+
+  // Animate burst cooldown
+  if(isBurst && burstTimeout < t) { isBurst = false; }
+
+  renderer.render(scene, camera);
+}
+animate();
+
+// ---- HAND TRACK & INTERACTION LOOP ----
+
+async function handLoop(){
+  let videoEl = document.getElementById('video');
+  if(handDetector && videoEl.readyState>=2) {
+    const res = handDetector.detectForVideo(videoEl, performance.now());
+    if(res && res.landmarks && res.landmarks[0]){
+      let lms = res.landmarks[0];
+      // Gesture recognition
+      let {type} = gestureFromLandmarks(lms);
+      // Swipe (track index finger x)
+      let idxX = lms[8]?lms[8].x:0; // Normalized [0,1]
+      let curT = performance.now();
+      let gestureKey = null;
+      // Swipe logic
+      if (lastX && Math.abs(idxX - lastX) > 0.34 && curT > swipeCooldown) {
+        if(idxX - lastX > 0) { // swipe right
+          currentTemplate = (currentTemplate+1)%templates.length;
+        } else {
+          currentTemplate = (currentTemplate+templates.length-1)%templates.length;
+        }
+        switchTemplate(currentTemplate);
+        swipeCooldown = curT+900;
+      }
+      lastX = idxX;
+
+      // Gesture mappings
+      if(type==="open"){
+        gestureKey="Open palm 🖐️ (expansion)";
+        particleUniforms.uExpansion.value += (1.72 - particleUniforms.uExpansion.value)*0.13;
+        particleUniforms.uTwirl.value += 0.011;
+      }
+      else if(type==="fist"){
+        gestureKey="Fist ✊ (color)";
+        particleUniforms.uExpansion.value += (1.0 - particleUniforms.uExpansion.value)*0.09;
+        particleUniforms.uTwirl.value += 0.04;
+      }
+      else if(type==="pinch" && curT > pinchCooldown){
+        // burst: fireworks!
+        gestureKey="Pinch 🤏 (fireworks!)";
+        isBurst = true; burstTimeout = clock.getElapsedTime()+0.7;
+        particleUniforms.uExpansion.value = 3 + Math.random()*2;
+        switchTemplate(4); // Firework mode
+        pinchCooldown = curT + 1200;
+      }
+      else {
+        gestureKey = (type==="partial" ? "Partial hand" : "No hand");
+        particleUniforms.uExpansion.value += (1.0-particleUniforms.uExpansion.value)*0.03;
+        particleUniforms.uTwirl.value += 0.002;
+      }
+      // Update label
+      document.getElementById('gestureName').innerText = gestureKey;
+      // (Optionally) update geometry dynamically for shapes like firework
+      if(currentTemplate===4 || isBurst){
+        updateParticleGeometry(currentTemplate, particleUniforms.uTime.value);
+      }
+    }
+  }
+  setTimeout(handLoop, 20);
+}
+
+// ---- INIT EVERYTHING ----
+(async()=>{
+  await initHandDetector();
+  document.getElementById('helpText').innerHTML = "🖐️ Palm expands · ✊ Fist color-cycles · 🤏 Pinch: burst · ➡️/⬅️ Swipe = template";
+  handLoop();
+  window.addEventListener('resize', ()=>{
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+  // Keyboard: left/right arrow switches templates (fallback for demo/test)
+  window.addEventListener('keydown', e=>{
+    if(e.key==='ArrowRight') switchTemplate((currentTemplate+1)%templates.length);
+    if(e.key==='ArrowLeft') switchTemplate((currentTemplate-1+templates.length)%templates.length);
+  });
+})();
+</script>
+</body>
+</html>
